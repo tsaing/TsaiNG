@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>即時通訊軟體 - NG-Chat (迭代版)</title>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        // 導入你需要使用的 Firebase SDK 功能
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+        import { getAnalytics } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-analytics.js";
+        // 導入 Realtime Database 相關功能，並新增 serverTimestamp
+        import { getDatabase, ref, push, onValue, remove, query, limitToFirst, limitToLast, orderByChild, serverTimestamp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js";
+
+        // 你的 Firebase 網頁應用程式配置
+        const firebaseConfig = {
+            apiKey: "AIzaSyCikm3n5wtQiTMmVMWwyb-AeSfzsy9H1dI",
+            authDomain: "ng-chat-bb271.firebaseapp.com",
+            projectId: "ng-chat-bb271",
+            storageBucket: "ng-chat-bb271.firebasestorage.app",
+            messagingSenderId: "11581831126",
+            appId: "1:11581831126:web:3a0e438390144fb5675677",
+            measurementId: "G-JRQFBLDJT1"
+        };
+
+        // 初始化 Firebase
+        const app = initializeApp(firebaseConfig);
+        const analytics = getAnalytics(app); // Google Analytics initialized
+        const database = getDatabase(app); // Realtime Database initialized
+        const messagesRef = ref(database, 'chat_messages'); // Reference to our chat messages in RTDB
+
+        let currentUsername = '';
+        const MESSAGE_LIMIT = 30; // 最多儲存的訊息數量
+
+        // --- HTML 元素參考 ---
+        const loginScreen = document.getElementById('login-screen');
+        const chatScreen = document.getElementById('chat-screen');
+        const passwordInput = document.getElementById('password-input');
+        const passwordSubmitBtn = document.getElementById('password-submit-btn');
+        const usernameContainer = document.getElementById('username-container');
+        const usernameInput = document.getElementById('username-input');
+        const usernameSubmitBtn = document.getElementById('username-submit-btn');
+        const chatMessages = document.getElementById('chat-messages');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+        const currentUserDisplay = document.getElementById('current-user-display');
+        const passwordErrorDisplay = document.getElementById('password-error-display'); // 新增錯誤顯示元素
+        const usernameErrorDisplay = document.getElementById('username-error-display'); // 新增錯誤顯示元素
+
+
+        // --- 登入流程 ---
+        passwordSubmitBtn.addEventListener('click', () => {
+            if (passwordInput.value === '230189487') {
+                passwordInput.disabled = true;
+                passwordSubmitBtn.disabled = true;
+                passwordErrorDisplay.textContent = ''; // 清除錯誤訊息
+                usernameContainer.style.display = 'block';
+                usernameInput.focus();
+            } else {
+                passwordErrorDisplay.textContent = '密碼錯誤，請重新輸入！'; // 顯示錯誤訊息
+                passwordInput.value = '';
+                passwordInput.focus();
+            }
+        });
+
+        usernameSubmitBtn.addEventListener('click', () => {
+            const username = usernameInput.value.trim();
+            if (username) {
+                currentUsername = username;
+                sessionStorage.setItem('chat_username', currentUsername); // 儲存使用者名稱
+                usernameErrorDisplay.textContent = ''; // 清除錯誤訊息
+                loginScreen.style.display = 'none';
+                chatScreen.style.display = 'flex';
+                currentUserDisplay.textContent = `當前使用者: ${currentUsername}`;
+                messageInput.focus();
+                setupChatListener(); // 成功登入後啟動聊天監聽
+            } else {
+                usernameErrorDisplay.textContent = '請輸入您的使用者名稱！'; // 顯示錯誤訊息
+                usernameInput.focus();
+            }
+        });
+
+        // 檢查是否有儲存的使用者名稱，如果有的話直接進入聊天介面
+        window.addEventListener('load', () => {
+            const storedUsername = sessionStorage.getItem('chat_username');
+            if (storedUsername) {
+                currentUsername = storedUsername;
+                loginScreen.style.display = 'none';
+                chatScreen.style.display = 'flex';
+                currentUserDisplay.textContent = `當前使用者: ${currentUsername}`;
+                setupChatListener();
+                messageInput.focus();
+            } else {
+                loginScreen.style.display = 'flex';
+                // 確保usernameContainer先隱藏，再讓passwordInput聚焦
+                usernameContainer.style.display = 'none';
+                passwordInput.focus();
+            }
+        });
+
+        // --- 聊天功能 ---
+        sendButton.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { // 避免 Shift + Enter 換行也觸發發送
+                e.preventDefault(); // 阻止預設換行行為
+                sendMessage();
+            }
+        });
+
+        async function sendMessage() {
+            const messageText = messageInput.value.trim();
+            if (!messageText) {
+                console.warn("Message input is empty.");
+                return; // 防止發送空訊息
+            }
+            if (!currentUsername) {
+                console.error("Username not set. Cannot send message.");
+                alert("使用者名稱未設定，無法發送訊息。請重新登入。");
+                return;
+            }
+
+            const newMessage = {
+                username: currentUsername,
+                text: messageText,
+                timestamp: serverTimestamp() // 使用 Firebase 伺服器時間戳記
+            };
+
+            try {
+                // 1. 推送新訊息到 Realtime Database
+                await push(messagesRef, newMessage);
+                messageInput.value = ''; // 清空輸入框
+                console.log("訊息已成功發送!");
+
+                // 2. 檢查並刪除超出的舊訊息，確保只保留 MESSAGE_LIMIT 條
+                // 查詢比 MESSAGE_LIMIT 多一條的訊息，並按時間戳排序，這樣第一條就是最舊的
+                const excessQuery = query(messagesRef, orderByChild('timestamp'), limitToFirst(MESSAGE_LIMIT + 1));
+                const snapshot = await excessQuery.once('value'); // 使用 .once() 取得當前值
+
+                if (snapshot.exists()) {
+                    const messageKeys = [];
+                    snapshot.forEach(childSnapshot => {
+                        messageKeys.push(childSnapshot.key);
+                    });
+
+                    if (messageKeys.length > MESSAGE_LIMIT) {
+                        // messageKeys 的第一個元素就是最早的訊息鍵，因為我們使用了 limitToFirst 和 orderByChild
+                        const oldestKeyToDelete = messageKeys[0]; 
+                        const messageToDeleteRef = ref(database, `chat_messages/${oldestKeyToDelete}`);
+                        await remove(messageToDeleteRef);
+                        console.log(`已移除最舊訊息: ${oldestKeyToDelete}`);
+                    }
+                }
+
+            } catch (error) {
+                console.error("發送訊息或處理訊息限制時發生錯誤:", error);
+                alert("發送訊息失敗或處理訊息限制時發生錯誤！請檢查控制台。");
+            }
+        }
+
+        // 監聽 Realtime Database 訊息變動
+        function setupChatListener() {
+            // 監聽最新的 MESSAGE_LIMIT 條訊息，並按時間戳排序
+            // onValue 會在初次載入和每次資料變動時觸發
+            onValue(query(messagesRef, orderByChild('timestamp'), limitToLast(MESSAGE_LIMIT)), (snapshot) => {
+                chatMessages.innerHTML = ''; // 清空聊天紀錄
+                
+                if (snapshot.exists()) {
+                    const messagesArray = [];
+                    // snapshot.forEach 確保按照查詢的順序處理資料
+                    snapshot.forEach(childSnapshot => {
+                        messagesArray.push(childSnapshot.val());
+                    });
+                    
+                    // messagesArray 已經由 Realtime Database 按照 timestamp 排序好了
+                    messagesArray.forEach(msg => {
+                        const messageElement = document.createElement('div');
+                        messageElement.classList.add('message-item');
+                        
+                        // serverTimestamp 可能會是 null 直到資料寫入完成，所以要檢查
+                        const timestampValue = msg.timestamp || Date.now(); 
+                        const date = new Date(timestampValue);
+                        const timeString = `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`;
+                        
+                        messageElement.innerHTML = `
+                            <span class="message-time">[${timeString}]</span>
+                            <span class="message-username">${msg.username}:</span>
+                            <span class="message-text">${msg.text}</span>
+                        `;
+                        chatMessages.appendChild(messageElement);
+                    });
+                    // 捲動到底部
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
+            }, (error) => {
+                console.error("監聽 Realtime Database 訊息時發生錯誤:", error);
+                alert("載入聊天訊息時發生錯誤！請檢查控制台。");
+            });
+        }
+    </script>
+    <style>
+        body {
+            font-family: '微軟正黑體', 'Microsoft JhengHei', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            color: #333;
+        }
+        #app-container {
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            width: 90%;
+            max-width: 600px;
+            height: 80vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        #login-screen, #chat-screen {
+            flex-grow: 1;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+        }
+        #login-screen {
+            display: none; /* 預設隱藏，由 JS 決定顯示 */
+        }
+        #login-screen h1, #chat-screen h1 {
+            color: #4CAF50;
+            margin-bottom: 20px;
+        }
+        input[type="password"], input[type="text"] {
+            width: calc(100% - 20px);
+            padding: 10px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 1rem;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: background-color 0.3s ease;
+            margin-top: 5px; /* 給按鈕一點間距 */
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #a0a0a0;
+            cursor: not-allowed;
+        }
+        .error-message {
+            color: #e74c3c;
+            font-size: 0.9em;
+            margin-top: -5px;
+            margin-bottom: 10px;
+        }
+        #username-container {
+            display: none; /* 預設隱藏 */
+            margin-top: 20px;
+            width: 100%;
+        }
+        #chat-messages {
+            flex-grow: 1;
+            border: 1px solid #eee;
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 10px;
+            overflow-y: auto;
+            background-color: #e9ebee;
+            text-align: left;
+        }
+        .message-item {
+            margin-bottom: 8px;
+            word-wrap: break-word;
+        }
+        .message-time {
+            color: #888;
+            font-size: 0.85em;
+            margin-right: 5px;
+        }
+        .message-username {
+            font-weight: bold;
+            color: #2196F3; /* 藍色 */
+            margin-right: 5px;
+        }
+        .message-text {
+            color: #333;
+        }
+        #message-input-area {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        #message-input-area input {
+            flex-grow: 1;
+            margin-bottom: 0;
+        }
+        #current-user-display {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 10px;
+            text-align: right;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="app-container">
+        <!-- 登入頁面 -->
+        <div id="login-screen">
+            <h1>歡迎使用 NG-Chat 即時通訊</h1>
+            <p>請輸入密碼以繼續：</p>
+            <input type="password" id="password-input" placeholder="請輸入密碼">
+            <div id="password-error-display" class="error-message"></div>
+            <button id="password-submit-btn">確認密碼</button>
+
+            <div id="username-container">
+                <p>密碼正確！請輸入您的使用者名稱：</p>
+                <input type="text" id="username-input" placeholder="請輸入使用者名稱">
+                <div id="username-error-display" class="error-message"></div>
+                <button id="username-submit-btn">進入聊天室</button>
+            </div>
+        </div>
+
+        <!-- 聊天室頁面 -->
+        <div id="chat-screen" style="display: none;">
+            <h1>NG-Chat 聊天室</h1>
+            <div id="current-user-display"></div>
+            <div id="chat-messages">
+                <!-- 聊天訊息將顯示在這裡 -->
+            </div>
+            <div id="message-input-area">
+                <input type="text" id="message-input" placeholder="輸入您的訊息...">
+                <button id="send-button">發送</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
